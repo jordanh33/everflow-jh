@@ -1,0 +1,136 @@
+name: Deploy_DOTNET_APP 
+
+# this section will contain vault connection variables - added this so that if any sensitive details are needed for deployment
+# e.g. hosts (ip addresses), database connection details, application credentials etc, then it can connect to the vault and use the secrets 
+# for deployment - azure vault can be used, but ive used a vault like hashicorp vault 
+variables:
+  - name: vault_address_test
+    value: https://vault.testvault.com
+  - name: vault_mount
+    value: projects
+  - name: vault_secrets_path_test
+    value: test
+  - name: vault_inventory_path_test
+    value: projects/test/hosts
+  - name: vault_address_production
+    value: https://vault.productionvault.com
+  - name: vault_secrets_path_prodcution
+    value: production
+  - name: vault_inventory_path
+    value: projects/production/hosts
+  - name: dockerRegistryServiceConnection
+    value: azure-registry-connection
+  - name: containerRegistry
+    value: app-container-registry
+  - name: imageName
+    value: dotnetapp
+  - name: testEnvironment
+    value: test
+  - name: roleId
+    value: rold_id.txt
+  - name: secretId
+    value: secret_id.txt 
+
+# this is purely for the automation code, not really something 
+# that would be needed in this senario, but if you have multiple app source codes, mutliple automation code (e.g. anisble scripts )
+# this can be an option to build a container, which will pull all your required app repos via ansible galxay, run this within a container
+# which after building stores in an azure container registry repo and can be used as version/release control
+resources:
+  containers:
+    - container: automation_deliveryContainer
+      image: azureregistry.azurecr.io/automation:${{ parameters.container_version }}
+      endpoint: azureregistry-dotnet
+  repositories:
+    - repository: build-container
+      type: git
+      name: automation/build-container 
+
+
+# e.g this can trigger when pushes are made to main, and also branches that include build / release etc. 
+trigger:
+  branches:
+    include:
+      - main
+      - build/*
+      - release/*
+
+stages:
+  - stage: Build dotnet app image
+    displayName: Build_image
+    jobs:
+      - deployment: Build_image
+        displayName: Build_image
+        environment: test # good way to introduce approvals processes 
+        pool: test-pool # might have a different azure agent to prod 
+        workspace:
+          clean: all
+        container: automation_deliveryContainer
+        cancelTimeoutInMinutes: 5
+        strategy:
+         runOnce:
+          deploy:
+            steps:
+            - task: Docker@2
+              name: 'Build and push Docker image'
+              inputs:
+                command: buildAndPush
+                repository: $(containerRegistry)/$(imageName) # push this to azure registry 
+                Dockerfile: samples/aspnetapp/Dockerfile
+                tags: |
+                  $(Build.BuildId)
+                containerRegistry: $(dockerRegistryServiceConnection)
+
+  - stage: Deploy_To_Test
+    displayName: Deploy to Test Environment
+    dependsOn: Build
+    jobs:
+      - job: DeployTest
+        pool: test-pool
+        workspace:
+          clean: all
+        steps:
+        - task: DownloadSecureFile@1
+          name: roleId
+          inputs:
+            securefile: '${{ variables.roleId }}'
+        - task: DownloadSecureFile@1
+          name: secretId
+          inputs:
+            securefile: '${{ variables.roleId }}'    
+        - script: | 
+            ansible-playbook --extra-vars "role_id_path=$(roleId.secureFilePath) secret_id_path=$(secretId.secureFilePath)" playbooks/dotnet_app.yml -v
+          name: Deploy_DOTNETAPP_to_TEST
+          env:
+            VAULT_ADDR: $(vault_address)
+            VAULT_MOUNT: $(vault_mount)
+            ROLE_ID: $(roleId.secureFilePath)
+            SECRET_ID: $(secretId.secureFilePath)
+            SECRETS_PATH: $(vault_secrets_path)
+
+  - stage: Deploy_To_Production
+    displayName: Deploy to Production Environment
+    dependsOn: DeployToTest
+    condition: succeeded()   # will run this stage once test run has succeeded 
+    jobs:
+      - job: DeployProduction
+        pool: production-pool   # with approvals 
+        workspace:
+          clean: all
+        steps:
+        - task: DownloadSecureFile@1
+          name: roleId
+          inputs:
+            securefile: '${{ variables.roleId }}'
+        - task: DownloadSecureFile@1
+          name: secretId
+          inputs:
+            securefile: '${{ variables.roleId }}'    
+        - script: | 
+            ansible-playbook --extra-vars "role_id_path=$(roleId.secureFilePath) secret_id_path=$(secretId.secureFilePath)" playbooks/dotnet_app.yml -v
+          name: Deploy_DOTNETAPP_to_Production
+          env:
+            VAULT_ADDR: $(vault_address_production) # goes to the production vault 
+            VAULT_MOUNT: $(vault_mount)
+            ROLE_ID: $(roleId.secureFilePath)
+            SECRET_ID: $(secretId.secureFilePath) 
+            SECRETS_PATH: $(vault_secrets_path_production) # goes to production vault to grap aks cluster spn details to run the helm command to deploy

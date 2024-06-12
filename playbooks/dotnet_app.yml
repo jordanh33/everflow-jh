@@ -1,0 +1,47 @@
+- name: Deploy ASP DOTNET APP
+  hosts: localhost 
+  environment:
+    ROLE_ID: "{{ lookup('env', 'ROLE_ID') }}"
+    SECRET_ID: "{{ lookup('env', 'SECRET_ID') }}"
+    VAULT_MOUNT: "{{ lookup('env', 'VAULT_MOUNT') }}"
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') }}"
+    SECRETS_PATH: "{{ lookup('env', 'SECRETS_PATH') }}"
+
+  tasks:
+    - name: roleid
+      set_fact:
+        role_id: "{{ lookup('file', '{{ role_id_path }}') }}"
+    - name: secretid
+      set_fact:
+        secret_id: "{{ lookup('file', '{{ secret_id_path }}') }}"
+
+    - name: Connect to Vault & AKS Cluster
+      no_log: true
+      shell:
+        cmd: | 
+          vault login $(vault write -format=json auth/approle/login role_id={{ role_id }} secret_id={{ secret_id }} | jq -r .auth.client_token)
+          CLIENT_ID=$(vault kv get -field=azure_application_id $VAULT_MOUNT/$SECRETS_PATH/azure)
+          CLIENT_SECRET=$(vault kv get -field=azure_application_secret $VAULT_MOUNT/$SECRETS_PATH/azure)
+          TENANT_ID=$(vault kv get -field=tenant_id $VAULT_MOUNT/$SECRETS_PATH/azure)
+          SUBSCRIPTION_ID=$(vault kv get -field=subscription_id $VAULT_MOUNT/$SECRETS_PATH/azure)
+          RESOURCE_GROUP=$(vault kv get -field=azure_resource_group_name $VAULT_MOUNT/$SECRETS_PATH/azure)
+          CLUSTER_NAME=$(vault kv get -field=cluster_name $VAULT_MOUNT/$SECRETS_PATH/azure)
+          az login --output none --service-principal -u ${CLIENT_ID} -p ${CLIENT_SECRET} --tenant ${TENANT_ID}
+          az account set --subscription ${SUBSCRIPTION_ID}
+          az aks get-credentials --overwrite-existing --resource-group ${RESOURCE_GROUP} --name ${CLUSTER_NAME}
+
+    - name: Fetch values.yaml from Vault
+      shell:
+        cmd: |
+          vault kv get -format=json $VAULT_MOUNT/$SECRETS_PATH/dotnet_app | jq -r '.data.data' > dotnet_app.yaml
+      args:
+        chdir: ../charts
+
+    - name: Deploy release with Helm
+      shell:
+        cmd: |
+          helm upgrade dotnet charts/dotnet_app --install --debug -f dotnet_app.yaml 
+      args:
+        chdir: ../charts
+
+    
