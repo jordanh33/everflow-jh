@@ -1,5 +1,13 @@
 name: Deploy_DOTNET_APP 
 
+parameters:
+  - name: container_version
+    type: string
+    default: 1.0.0
+    values: 
+      - dev
+      - 1.0.0
+
 # this section will contain vault connection variables - added this so that if any sensitive details are needed for deployment
 # e.g. hosts (ip addresses), database connection details, application credentials etc, then it can connect to the vault and use the secrets 
 # for deployment - azure vault can be used, but ive used a vault like hashicorp vault 
@@ -38,7 +46,7 @@ variables:
 resources:
   containers:
     - container: automation_deliveryContainer
-      image: azureregistry.azurecr.io/automation:${{ parameters.container_version }}
+      image: azureregistry.azurecr.io/automation:${{ variables.container_version }}
       endpoint: azureregistry-dotnet
   repositories:
     - repository: build-container
